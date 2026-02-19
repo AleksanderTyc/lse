@@ -3,3 +3,4 @@ secrets.json
 
 # python pip venv
 venv
+__pycache__
