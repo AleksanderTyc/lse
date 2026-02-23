@@ -20,7 +20,8 @@ events_table = Table(
     metadata_obj,
     Column("id", Integer, primary_key=True),
     Column("load_timestamp", DateTime, nullable=False, default=func.datetime('subsec')),
-    Column("load_type", String(1), nullable=False)
+    Column("load_type", String(1), nullable=False),
+    Column("as_at_date", Date, nullable=False)
 )
 
 

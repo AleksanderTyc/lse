@@ -93,7 +93,10 @@ import datetime
 print( datetime.datetime.today() )
 with engine.connect() as conn:
     # sql_insert_expr = sqlalchemy.insert(events_table).values(load_timestamp=datetime.datetime.today())
-    sql_insert_expr = sqlalchemy.insert(events_table).values()
+    # As per https://docs.sqlalchemy.org/en/20/core/sqlelement.html#sqlalchemy.sql.expression.func
+    # "If the function name is unknown to SQLAlchemy, it will be rendered exactly as is."
+    # Since no values are provided, INSERT will use DB's defaults, set in LSE_1Off_DBSetup.py
+    sql_insert_expr = sqlalchemy.insert(events_table).values() # This will use SQLite's func.datetime('subsec')
     sql_insert_expr = sqlalchemy.insert(events_table).values(load_type='B')
     print( sql_insert_expr )
     compiled = sql_insert_expr.compile()
