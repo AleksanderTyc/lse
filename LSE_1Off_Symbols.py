@@ -1539,6 +1539,27 @@ lSymbols = [
 with engine.connect() as conn:
     result = conn.execute(
         sqlalchemy.text("insert into symbols(sector_id, symbol, name) values(:sector_id, :symbol, :name)"),
-        [{'sector_id':l['sector_id'], 'symbol': l['symbol'], 'name': l['name']} for l in lSymbols]
+        [{
+            'sector_id':l['sector_id'],
+            'symbol': l['lse_name'][len(l['lse_name'])-l['lse_name'][::-1].find('('):len(l['lse_name'])-1],
+            'name':l['lse_name'][0:len(l['lse_name'])-l['lse_name'][::-1].find('(')-1].strip()
+            } for l in lSymbols]
         )
     conn.commit()
+
+"""
+# Fixing multiple braces problem in company name 23FEB2026
+# d1 = [cmpny['lse_name'] for cmpny in lSymbols if cmpny['lse_name'][-1] == ')']
+d1 = [{
+    'lse_name': cmpny['lse_name'],
+    # 'lse_name_rev': cmpny['lse_name'][::-1],
+    'lastb':len(cmpny['lse_name'])-cmpny['lse_name'][::-1].find('('),
+    'symbol':cmpny['lse_name'][len(cmpny['lse_name'])-cmpny['lse_name'][::-1].find('('):len(cmpny['lse_name'])-1],
+    'name':cmpny['lse_name'][0:len(cmpny['lse_name'])-cmpny['lse_name'][::-1].find('(')-1].strip()
+    } for cmpny in lSymbols if cmpny['lse_name'].count('(') != 1 or cmpny['lse_name'].startswith('Y')]
+print( len(d1) )
+for symdata in d1:
+    print( symdata )
+{'lse_name': 'Utd.bk (regs) (UBLS)', 'lastb': 15}
+{'lse_name': 'Cathay Fin (s) (CFHS)', 'lastb': 16}
+"""
