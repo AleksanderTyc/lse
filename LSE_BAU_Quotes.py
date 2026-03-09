@@ -8,6 +8,7 @@ import yfinance as yf
 import pandas as pd
 
 from typing import Tuple, List, Dict, Any, Optional
+import sys
 
 # gl_load_id:Optional[int] = None
 # gl_as_at_date:Optional[datetime.date] = None
@@ -48,8 +49,7 @@ def determine_dates(par_date:Optional[str]) -> Tuple[datetime.date,datetime.date
             asatdate = current_date - datetime.timedelta(days=days_to_subtract)
         
     startdate = asatdate - datetime.timedelta(days=asatdate.weekday()) -datetime.timedelta(weeks=104)
-    # startdate = asatdate - datetime.timedelta(days=asatdate.weekday()) -datetime.timedelta(weeks=4)
-
+    # startdate = asatdate - datetime.timedelta(days=asatdate.weekday()) -datetime.timedelta(weeks=2)
     return( startdate, asatdate )
 
 
@@ -67,7 +67,7 @@ def create_load_record(par_date:datetime.date) -> int:
     Returns:
         int: load id
     """
-
+    
     with engine.connect() as conn:
         sql_insert_expr = sqlalchemy.insert(events_table).values(load_type='I', as_at_date=par_date)
         # print( f"* D * sql_insert_expr {sql_insert_expr}" )
@@ -75,16 +75,6 @@ def create_load_record(par_date:datetime.date) -> int:
         # print( f"* D * inserted_primary_key {result.inserted_primary_key[0]}" )
         conn.commit()
         return result.inserted_primary_key[0]
-
-
-# Diagnostics
-# print( f"param_load_id is {param_load_id}" )
-
-# as_at_str = asatdate.strftime("%Y-%m-%d")
-# start_str = startdate.strftime("%Y-%m-%d")
-
-# print( f"as_at_str is {as_at_str}" )
-# print( f"start_str is {start_str}" )
 
 
 # Create symbols_to_process list, mapping symbol, symbol.L and symbol_id
@@ -114,7 +104,7 @@ def get_processed_symbols() -> Tuple[List[str],Dict[str,int],Dict[str,str]]:
             symbols_to_process.append(yf_symbol)
             map_yfsymbol_to_id[yf_symbol] = row[0]
             map_yfsymbol_to_symbol[yf_symbol] = row[1]
-            
+    
     return( symbols_to_process, map_yfsymbol_to_id, map_yfsymbol_to_symbol )
 
 
@@ -166,15 +156,14 @@ def take_nth_slice(par_slice_no:int) -> pd.DataFrame:
         interval='1d',
         actions=True
         )
-
     # Reformat data, populate additional columns
     df_long = df.stack(level='Ticker', future_stack=True).rename(columns={'Volume':'volume'}).reset_index()
-
+    
     df_long['load_id'] = gl_load_id
     df_long['quote_date']=(df_long['Date']).dt.date
     df_long['symbol'] = df_long['Ticker'].map(lambda x: map_yfsymbol_to_symbol[x])
     df_long['symbol_id'] = df_long['Ticker'].map(lambda x: map_yfsymbol_to_id[x])
-
+    
     # Convert price columns from float to integer (multiply by 1,000,000)
     df_long['open'] = (df_long['Open']*1000000).round().astype(pd.Int64Dtype())
     df_long['high'] = (df_long['High']*1000000).round().astype(pd.Int64Dtype())
@@ -193,11 +182,22 @@ def save_nth_slice(par_slice_no:int, par_slice:pd.DataFrame):
         par_slice (pd.DataFrame): Pandas DataFrame to be saved to quotes
     """
     
+    # Take current slice of symbols
+    slice_symbols = [map_yfsymbol_to_symbol[x] for x in symbols_to_process[par_slice_no*31:(par_slice_no+1)*31]]
+    
     # Open a new transaction on DB
     with engine.connect() as conn:
     # Delete quote data pertinent to the current slice
+    # DELETE FROM load_events where as_at_date > '2026-03-05';
+    # delete from quotes where symbol in('ACSO','ACRM') and quote_date > '2026-02-28';
+    # select * from quotes where symbol in('ACSO','ACRM') and quote_date > '2026-02-28';
         conn.execute(
-            sqlalchemy.text("delete from quotes where symbol in (:x) and quote_date >= :y;"), [{'x':10,'y':11},{'x':20,'y':21}]
+            sqlalchemy.text("""
+                delete from quotes where symbol in :x and quote_date >= :y;""")
+            .bindparams(
+                sqlalchemy.bindparam("x", value=slice_symbols, expanding=True),
+                y=gl_start_date
+            )
         )
     # Insert current slice data
         par_slice[
@@ -210,7 +210,7 @@ def save_nth_slice(par_slice_no:int, par_slice:pd.DataFrame):
             )
     # Commit the transaction
         conn.commit()
-    
+
 
 # Since data are processed in slices, we may need to append all slices together, before inserting.
 # This is to make it into a single transaction, either succeeding or failing all at once:
@@ -221,23 +221,35 @@ def save_nth_slice(par_slice_no:int, par_slice:pd.DataFrame):
 
 
 
-gl_start_date, gl_as_at_date = determine_dates(None)
+print( f'* D * Invoked as {sys.argv}, len of argv is {len(sys.argv)}' )
+
+gl_start_date, gl_as_at_date = determine_dates(None if len(sys.argv) == 1 else sys.argv[1])
 gl_load_id = create_load_record(gl_as_at_date)
 
-# symbols_to_process = None
-"""
-# Original application
-df_long['symbol'] = df_long['Ticker'].map(lambda x: map_yfsymbol_to_symbol[x])
-df_long['symbol_id'] = df_long['Ticker'].map(lambda x: map_yfsymbol_to_id[x])
-"""
+
+# Diagnostics
+print( f"* D * gl_load_id is {gl_load_id}" )
+print( f"* D * gl_start_date is {gl_start_date}" )
+print( f"* D * gl_as_at_date is {gl_as_at_date}" )
+
+# as_at_str = asatdate.strftime("%Y-%m-%d")
+# start_str = startdate.strftime("%Y-%m-%d")
+
+# print( f"as_at_str is {as_at_str}" )
+# print( f"start_str is {start_str}" )
+# sys.exit(0)
+
+
 symbols_to_process, map_yfsymbol_to_id, map_yfsymbol_to_symbol = get_processed_symbols()
 
 for nthslice in range(0,48):
+    print( f'* D * Processing slice {nthslice}, symbols {symbols_to_process[nthslice*31]} to {symbols_to_process[(nthslice+1)*31-1]}')
     df_shaped = take_nth_slice(nthslice)
     save_nth_slice(nthslice, df_shaped)
 
 
 # We may need to update load table.
+# 
 with engine.connect() as conn:
     conn.execute(
         sqlalchemy.text("update load_events set load_type='P' where id=:x;"), {'x':gl_load_id}
