@@ -37,306 +37,269 @@ Plan
 -- present the graph of index over dates
 """
 
+
+import datetime, sqlalchemy
+import yfinance as yf
 import pandas as pd
-import sqlite3
-from datetime import datetime
+import numpy as np
+import time as tm
 
-def calculate_sma_130(start_date, end_date, db_path, symbol_ids=None):
-    """
-    Load quote data for a date range and calculate 130-period simple moving average.
-    
-    Parameters:
-    start_date: string or date in 'YYYY-MM-DD' format
-    end_date: string or date in 'YYYY-MM-DD' format
-    db_path: path to SQLite database
-    symbol_ids: optional list of symbol_ids to filter by. If None, returns all symbols
-    
-    Returns:
-    DataFrame with symbol, quote_date, close, and sma_130 columns
-    """
-    
-    conn = sqlite3.connect(db_path)
-    
-    try:
-        # Step 1: Build the SQL query
-        # We need to load data from start_date - 129 days to end_date to have enough data for the 130-day SMA
-        # Convert to datetime if strings
-        start_dt = pd.to_datetime(start_date).date()
-        end_dt = pd.to_datetime(end_date).date()
-        
-        # Calculate extended start date (go back 129 days before the start_date)
-        # This ensures we have enough data for the 130-period SMA calculation
-        extended_start = start_dt - pd.Timedelta(days=129)
-        
-        print(f"Loading quote data from {extended_start} to {end_dt}")
-        print(f"Target date range for output: {start_dt} to {end_dt}")
-        
-        # Build query
-        query = """
-            SELECT 
-                quote_date,
-                symbol,
-                symbol_id,
-                close
-            FROM quotes 
-            WHERE quote_date BETWEEN ? AND ?
-        """
-        
-        params = [extended_start, end_dt]
-        
-        # Add symbol_id filter if provided
-        if symbol_ids:
-            placeholders = ','.join(['?'] * len(symbol_ids))
-            query += f" AND symbol_id IN ({placeholders})"
-            params.extend(symbol_ids)
-        
-        # Order by date and symbol to ensure proper rolling window
-        query += " ORDER BY symbol, quote_date"
-        
-        # Step 2: Load data into DataFrame
-        df = pd.read_sql_query(query, conn, params=params, parse_dates=['quote_date'])
-        
-        if df.empty:
-            print("No data found for the specified date range")
-            return pd.DataFrame()
-        
-        print(f"Loaded {len(df)} rows of quote data")
-        print(f"Unique symbols: {df['symbol'].nunique()}")
-        
-        # Step 3: Calculate 130-period simple moving average
-        # Group by symbol and calculate rolling average
-        # Using min_periods=130 ensures we only get SMA when we have a full window
-        df['sma_130'] = df.groupby('symbol')['close'].transform(
-            lambda x: x.rolling(window=130, min_periods=130).mean()
-        )
-        
-        # Step 4: Filter to only the requested date range
-        df_filtered = df[(df['quote_date'] >= start_dt) & (df['quote_date'] <= end_dt)].copy()
-        
-        # Step 5: Reorder columns for clarity
-        result_df = df_filtered[['quote_date', 'symbol', 'symbol_id', 'close', 'sma_130']]
-        
-        print(f"\nResult contains {len(result_df)} rows for {result_df['symbol'].nunique()} symbols")
-        print(f"Date range in result: {result_df['quote_date'].min()} to {result_df['quote_date'].max()}")
-        
-        return result_df
-        
-    except Exception as e:
-        print(f"Error calculating SMA: {e}")
-        raise
-    finally:
-        conn.close()
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+from typing import Tuple, List, Dict, Any, Optional
+import sys
+
+from LSE_1Off_DBSetup import engine, events_table
 
 
-def calculate_sma_130_with_validation(start_date, end_date, db_path, symbol_ids=None):
+gl_data_start_date:datetime.date
+gl_trend_start_date:datetime.date
+gl_trend_end_date:datetime.date
+
+gl_data:pd.DataFrame
+
+# Determine applicable dates
+def determine_dates(par_date:Optional[str]) -> Tuple[datetime.date,datetime.date,datetime.date]:
     """
-    Enhanced version with validation and additional statistics.
+    Determines data start date and trend start date
+
+    The calculation start with as at date determination.
+    As at date is the most recent quote date available in the DB.
+    Alternatively, an optional parameter par_date may be provided, which overrides as at date.
+    There is no check that par_date is available in DB.
+    
+    Trend end date is the most recent working date respective to (i.e. on or before) as at date.
+        
+    Trend start date is the date when trend calculation starts.
+    Since we require progression of trend over the last 3 full weeks,
+    we need to calculate the date when this period starts. Logic:
+    - take as at date, go back to Friday (unless it is Friday), go back 14+4 days, this should be Monday.
+    
+    Data start date is the earliest quote date that must be loaded to correctly calculate trend.
+    Trend is calculated from simple moving average over 130 bars. Logic:
+    - take trend start date, go back 27 weeks. This will give us 130 bars.
+    
+    Args:
+        par_date (str)(optional): as at date override
+
+    Returns:    
+        tuple[datetime.date,datetime.date]: ( data start date, trend start date, trend end date )
     """
+
+    # Take as at date - either from the parameter or from the DB data
+    if( par_date != None ):
+        asatdate = datetime.date.fromisoformat(par_date)
+    else:
+        lc_max_id = 0
+        lc_as_at_date = 0
+        with engine.connect() as conn:
+            result=conn.execute(sqlalchemy.text("select max(id) from load_events where load_type = 'P';"))
+            lc_max_id = result.all()[0][0]
+            print( f"* D * diag_only * lc_max_id is {lc_max_id}" )
+            result=conn.execute(sqlalchemy.text("select as_at_date from load_events where id=:id;"), {'id':lc_max_id})
+            lc_as_at_date = result.all()[0][0]
+            print( f"* D * diag_only * lc_as_at_date is {lc_as_at_date}, {type(lc_as_at_date)}" )
+        
+        asatdate = datetime.date.fromisoformat(lc_as_at_date)
     
-    conn = sqlite3.connect(db_path)
+    day_of_week = asatdate.weekday()
     
-    try:
-        # Convert dates
-        start_dt = pd.to_datetime(start_date).date()
-        end_dt = pd.to_datetime(end_date).date()
-        
-        # Extended start date for SMA calculation
-        extended_start = start_dt - pd.Timedelta(days=129)
-        
-        print("=" * 70)
-        print("CALCULATING 130-PERIOD SIMPLE MOVING AVERAGE")
-        print("=" * 70)
-        print(f"Target date range: {start_dt} to {end_dt}")
-        print(f"Data loading range: {extended_start} to {end_dt}")
-        
-        # Build query with extended range
-        query = """
-            SELECT 
-                quote_date,
-                symbol,
-                symbol_id,
-                close
-            FROM quotes 
-            WHERE quote_date BETWEEN ? AND ?
-        """
-        
-        params = [extended_start, end_dt]
-        
-        if symbol_ids:
-            placeholders = ','.join(['?'] * len(symbol_ids))
-            query += f" AND symbol_id IN ({placeholders})"
-            params.extend(symbol_ids)
-        
-        query += " ORDER BY symbol, quote_date"
-        
-        # Load data
-        df = pd.read_sql_query(query, conn, params=params, parse_dates=['quote_date'])
-        
-        if df.empty:
-            print("No data found for the specified date range")
-            return pd.DataFrame()
-        
-        print(f"\nData loaded: {len(df)} rows")
-        
-        # Check data quality
-        print(f"\nData quality check:")
-        print(f"  Unique symbols: {df['symbol'].nunique()}")
-        print(f"  Date range in loaded data: {df['quote_date'].min().date()} to {df['quote_date'].max().date()}")
-        
-        # Check for missing dates per symbol
-        symbols_with_issues = []
-        for symbol in df['symbol'].unique():
-            symbol_data = df[df['symbol'] == symbol]
-            expected_days = (end_dt - extended_start).days + 1
-            actual_days = len(symbol_data)
-            if actual_days < expected_days * 0.9:  # If more than 10% missing
-                symbols_with_issues.append((symbol, actual_days, expected_days))
-        
-        if symbols_with_issues:
-            print(f"\n⚠️  Warning: Some symbols have missing data:")
-            for symbol, actual, expected in symbols_with_issues[:5]:  # Show first 5
-                print(f"    {symbol}: {actual}/{expected} days ({(actual/expected)*100:.1f}%)")
-        
-        # Calculate SMA
-        print(f"\nCalculating 130-period SMA...")
-        df['sma_130'] = df.groupby('symbol')['close'].transform(
-            lambda x: x.rolling(window=130, min_periods=130).mean()
-        )
-        
-        # Filter to target date range
-        df_filtered = df[(df['quote_date'] >= start_dt) & (df['quote_date'] <= end_dt)].copy()
-        
-        # Generate statistics
-        result_df = df_filtered[['quote_date', 'symbol', 'symbol_id', 'close', 'sma_130']]
-        
-        print(f"\nResults:")
-        print(f"  Total rows: {len(result_df)}")
-        print(f"  Unique symbols: {result_df['symbol'].nunique()}")
-        print(f"  Date range: {result_df['quote_date'].min().date()} to {result_df['quote_date'].max().date()}")
-        
-        # SMA availability per symbol
-        sma_available = result_df.groupby('symbol')['sma_130'].count()
-        total_days = len(result_df['quote_date'].unique())
-        print(f"\nSMA availability:")
-        for symbol in result_df['symbol'].unique():
-            sma_count = sma_available[symbol]
-            sma_pct = (sma_count / total_days) * 100
-            print(f"  {symbol}: {sma_count}/{total_days} days ({sma_pct:.1f}%) with SMA")
-        
-        # Sample of the data
-        print(f"\nSample of calculated data (first 5 rows per symbol):")
-        sample_df = result_df.groupby('symbol').head(5)
-        print(sample_df.to_string(index=False))
-        
-        return result_df
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        raise
-    finally:
-        conn.close()
+    # Calculate the most recent working day respective to as at date
+    r_trend_end = asatdate
+    if( day_of_week > 4 ):
+        r_trend_end = asatdate - datetime.timedelta(days=(day_of_week-4))
+    
+    # Calculate the most recent Friday respective to as at date
+    days_to_subtract = (day_of_week + 3) % 7
+    last_friday = asatdate - datetime.timedelta(days=days_to_subtract)
+    
+    # Go back to Monday 18 days before - this is trend start date
+    r_trend_start = last_friday - datetime.timedelta(days=18)
+    
+    # Go back 27 weeks - this is data start date
+    r_data_start = r_trend_start - datetime.timedelta(weeks=27)
+    # r_data_start = r_trend_start - datetime.timedelta(weeks=2)
+    
+    return( r_data_start, r_trend_start , r_trend_end )
 
 
-def calculate_sma_130_alternative(start_date, end_date, db_path, symbol_ids=None):
+def extract_quote_data(par_date_start:datetime.date, par_date_end:datetime.date) -> pd.DataFrame:
     """
-    Alternative implementation using a more efficient approach for large datasets.
-    Uses pivot table to handle symbols as columns, which can be faster for many symbols.
+        Returns a dataframe for a given date interval.
+        
+        Extracts quote data (symbol, closing price) for all symbols available, for the given interval, eliminating symbols where volume is zero.
+        
+        Args:
+            par_date_start (datetime.date): extraction interval start date
+            par_date_end (datetime.date): extraction interval end date
+
+        Returns:    
+            pd.DataFrame: DataFrame ( quote date, symbol, symbol_id, close price )
     """
     
-    conn = sqlite3.connect(db_path)
+    # Build quotes query
+    sql_quotes_query = sqlalchemy.text("""
+        SELECT      quote_date,
+                    symbol,
+                    symbol_id,
+                    close
+        FROM        quotes
+        WHERE           volume > 0
+                    AND :start_date <= quote_date
+                    AND quote_date <= :end_date
+        ORDER BY    symbol,
+                    quote_date
+        ;
+    """)
+
+    # Define quotes query parameters        
+    sql_quotes_params = {
+        "start_date": par_date_start,
+        "end_date": par_date_end,
+        }
     
-    try:
-        # Convert dates
-        start_dt = pd.to_datetime(start_date).date()
-        end_dt = pd.to_datetime(end_date).date()
-        extended_start = start_dt - pd.Timedelta(days=129)
-        
-        # Load data
-        query = """
-            SELECT 
-                quote_date,
-                symbol,
-                close
-            FROM quotes 
-            WHERE quote_date BETWEEN ? AND ?
-        """
-        
-        params = [extended_start, end_dt]
-        
-        if symbol_ids:
-            placeholders = ','.join(['?'] * len(symbol_ids))
-            query += f" AND symbol_id IN ({placeholders})"
-            params.extend(symbol_ids)
-        
-        df = pd.read_sql_query(query, conn, params=params, parse_dates=['quote_date'])
-        
-        if df.empty:
-            return pd.DataFrame()
-        
-        # Pivot to have symbols as columns
-        pivot_df = df.pivot_table(
-            index='quote_date', 
-            columns='symbol', 
-            values='close',
-            aggfunc='first'
-        )
-        
-        # Calculate SMA for all symbols at once using rolling
-        sma_df = pivot_df.rolling(window=130, min_periods=130).mean()
-        
-        # Filter to target date range
-        sma_df = sma_df.loc[start_dt:end_dt]
-        pivot_df = pivot_df.loc[start_dt:end_dt]
-        
-        # Convert back to long format
-        result_df = pivot_df.stack().reset_index()
-        result_df.columns = ['quote_date', 'symbol', 'close']
-        
-        sma_stacked = sma_df.stack().reset_index()
-        sma_stacked.columns = ['quote_date', 'symbol', 'sma_130']
-        
-        # Merge close and SMA
-        result_df = result_df.merge(sma_stacked, on=['quote_date', 'symbol'], how='left')
-        
-        # Add symbol_id if needed
-        symbol_mapping = df[['symbol', 'symbol_id']].drop_duplicates().set_index('symbol')['symbol_id']
-        result_df['symbol_id'] = result_df['symbol'].map(symbol_mapping)
-        
-        # Reorder columns
-        result_df = result_df[['quote_date', 'symbol', 'symbol_id', 'close', 'sma_130']]
-        
-        return result_df
-        
-    except Exception as e:
-        print(f"Error: {e}")
-        raise
-    finally:
-        conn.close()
+    # Build symbols query
+    sql_symbols_query = sqlalchemy.text("""
+        SELECT      symbol,
+                    sectorKey,
+                    industryKey,
+                    marketCap
+        FROM        symbols
+        WHERE       attemptsSinceUpdate == 0
+        ORDER BY    symbol
+        ;
+    """)
+
+    # Define symbols query parameters        
+    sql_symbols_params = {
+        "start_date": par_date_start,
+        "end_date": par_date_end,
+        }
+
+    # Load data into DataFrame
+    with engine.connect() as conn:
+        df = pd.read_sql_query( sql_quotes_query, conn, params=sql_quotes_params )
+        # df_symbols = pd.read_sql_query(sql_symbols_query, conn, params=sql_symbols_params)
+        df_symbols = pd.read_sql_query( sql_symbols_query, conn )
+        df = df.merge(df_symbols, on='symbol')
+    
+    return df
 
 
-# Usage examples:
-if __name__ == "__main__":
-    # Example 1: Calculate SMA for all symbols
-    start_date = "2024-03-01"
-    end_date = "2024-03-31"
-    db_path = "your_database.db"
+def calculate_trend(
+    par_granular: pd.DataFrame,
+    par_sectorKey: Optional[str] = '<All>',
+    par_industryKey: Optional[str] = '<All>'
+    ) -> pd.DataFrame:
+    """
+        For the given granular data and sector / industry selection returns a dataframe with calculated trend.
+        
+        Subsets the granular data according to sector and industry parameters.
+        Calculates MA (over a window of 130 bars) and determines if closing price is above the MA (symbol is strong).
+        Calculates proportion of strong symbols on a given date.
+        Calculates total market capitalisation for the current selection.
+        
+        Args:
+            par_granular (pd.DataFrame): Granular data obtained from extract_quote_data
+            par_sectorKey (str)(optional): sector filtering criterion, set as '<All>' for all-inclusive
+            par_industryKey (str)(optional): industry filtering criterion, set as '<All>' for all-inclusive
+
+        Returns:    
+            pd.DataFrame: DataFrame ( quote date, symbol, symbol_id, close price )
+    """
     
-    # Basic usage
-    result = calculate_sma_130(start_date, end_date, db_path)
-    print(f"\nResult shape: {result.shape}")
-    print(result.head(10))
-    
-    # Enhanced with validation
-    result_enhanced = calculate_sma_130_with_validation(start_date, end_date, db_path)
-    
-    # Filter by specific symbol IDs
-    # result_filtered = calculate_sma_130(start_date, end_date, db_path, symbol_ids=[1, 2, 3])
-    
-    # Export to CSV
-    # result.to_csv('sma_130_output.csv', index=False)
-    
-    # Calculate for a specific symbol
-    # specific_symbol = "AAPL"
-    # result_aapl = result[result['symbol'] == specific_symbol]
-    # print(f"\nSMA for {specific_symbol}:")
-    # print(result_aapl.head())
+    # Subsets the granular data according to sector and industry parameters.
+    dfcond = pd.Series(True, index = par_granular.index)
+    if( par_sectorKey != '<All>'):
+        dfcond = dfcond & (par_granular.sectorKey == par_sectorKey)
+    if( par_industryKey != '<All>'):
+        dfcond = dfcond & (par_granular.sectorKey == par_industryKey)
+    dt_subset = par_granular[dfcond]
+
+    # Calculates MA and determines if closing price is above the MA.
+    # dt_aggd_s1 = dt_subset[['symbol','close']].groupby('symbol').rolling( window = 5, min_periods = 5 ).mean()
+    dt_aggd_s1 = dt_subset[['symbol','close']].groupby('symbol').rolling( window = 130, min_periods = 130 ).mean()
+    dt_aggd_s2 = dt_aggd_s1.reset_index(level='symbol')[['close']].rename(mapper = {'close':'ma'}, axis = 1)
+    dt_aggd = pd.concat([dt_subset, dt_aggd_s2], axis=1) # yes, the index integrity is kept
+    dt_aggd['strong'] = (dt_aggd.ma < dt_aggd.close).astype(int)
+    # At this stage data are still at (date, symbol) level.
+
+    # How many symbols are trading (vol>0) on this day, how many of them are strong
+    # Count is simple - include all, because data have already been filtered to exclude trivial volume.
+    # Also summarise total market capitalisation for the current selection.
+    dt_aggd_s1 = dt_aggd[['strong','marketCap','quote_date']].groupby('quote_date').aggregate(['count', 'sum'])
+    dt_aggd_s1.columns = pd.Index(['strong_count', 'strong_sum', 'mCap_count', 'mCap_sum'])
+    # Trendometer is the proportion of strong among all contributing
+    dt_aggd_s1['tmeter'] = dt_aggd_s1['strong_sum'] / dt_aggd_s1['strong_count']
+    # Reindex by dates and sort.
+    dt_aggd_s1.index = pd.to_datetime(dt_aggd_s1.index)
+    dt_aggd_s1 = dt_aggd_s1.drop(['mCap_count'], axis=1).sort_index()
+    return dt_aggd_s1.loc[gl_trend_start_date:gl_trend_end_date]
+
+
+print( f'* D * Invoked as {sys.argv}, len of argv is {len(sys.argv)}' )
+gl_data_start_date, gl_trend_start_date, gl_trend_end_date = determine_dates(None if len(sys.argv) == 1 else sys.argv[1])
+
+print( f"* D * gl_data_start_date is {gl_data_start_date}" )
+print( f"* D * gl_trend_start_date is {gl_trend_start_date}" )
+print( f"* D * gl_trend_end_date is {gl_trend_end_date}" )
+
+gl_data = extract_quote_data(gl_data_start_date, gl_trend_end_date)
+
+# Are there any NaNs in 'close' column?
+gl_data.close.isna().any()
+
+# gl_trend_data = calculate_trend(gl_data, '<All>', '<All>')
+gl_trend_data = calculate_trend(gl_data)
+"""
+gl_trend_data.loc[gl_trend_start_date:gl_trend_end_date]
+
+gl_trend_data = calculate_trend(gl_data, 'technology')
+gl_trend_data = calculate_trend(gl_data, 'technology', software-infrastructure')
+
+"""
+
+fig = go.Figure(data=[
+    go.Bar(
+        x=gl_trend_data.index,
+        y=gl_trend_data['tmeter'],
+        name='tmeter',
+        marker_color='steelblue',
+        marker_line_color='navy',
+        marker_line_width=1,
+        opacity=0.7,
+        text=gl_trend_data['tmeter'].round(3),  # Show values on hover
+        textposition='auto',
+        hovertemplate='<b>Date</b>: %{x|%Y-%m-%d}<br>' +
+                      '<b>tmeter</b>: %{y:.3f}<br>' +
+                      '<extra></extra>'
+    )
+])
+
+# Update layout
+fig.update_layout(
+    title='tmeter Values Over Time',
+    xaxis_title='Date',
+    yaxis_title='tmeter Value',
+    yaxis=dict(
+        range=[0, 1.05],
+        tickformat='.0%',
+        gridcolor='lightgray',
+        gridwidth=0.5
+    ),
+    xaxis=dict(
+        tickangle=45,
+        tickformat='%Y-%m-%d'
+    ),
+    template='plotly_white',
+    width=1200,
+    height=600,
+    hovermode='x unified'
+)
+
+# Show the chart
+fig.show()
+
+print("Interactive chart displayed! You can zoom, pan, and hover over bars.")
+

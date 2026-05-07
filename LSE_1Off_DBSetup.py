@@ -2,6 +2,9 @@
 # This is a DB setup script, intended to run as a one-off
 # It creates empty DB structures.
 
+# 03MAY2026 New fields added to symbols table,
+#           related to yfinance data availability and sector trend'o'meter development
+
 import sqlalchemy
 
 from sqlalchemy import create_engine, MetaData, Table, Column, ForeignKey, Integer, String, DateTime, Date
@@ -42,7 +45,32 @@ symbols_table = Table(
     Column("id", Integer, primary_key=True),
     Column("sector_id", Integer, ForeignKey("sectors.id")),
     Column("symbol", String(10), nullable=False),
-    Column("name", String)
+    Column("name", String),
+    
+# 03MAY2026 New fields added to symbols table
+    Column("targetHighPrice", Integer),
+    Column("targetLowPrice", Integer),
+    Column("targetMeanPrice", Integer),
+    Column("targetMedianPrice", Integer),
+    Column("recommendationMean", Integer),
+    Column("recommendationKey", String),
+    Column("numberOfAnalystOpinions", Integer),
+    Column("averageAnalystRating", String),
+    Column("dividendRate", Integer),
+    Column("dividendYield", Integer),
+    Column("exDividendDate", Date),
+    Column("payoutRatio", Integer),
+    Column("fiveYearAvgDividendYield", Integer),
+    Column("industryKey", String),
+    Column("industryDisp", String),
+    Column("sectorKey", String),
+    Column("sectorDisp", String),
+    Column("country", String),
+    Column("marketCap", Integer),
+    Column("shortName", String),
+    Column("longName", String),
+    Column("lastUpdateDate", Date, nullable=False),
+    Column("attemptsSinceUpdate", Integer)
 )
 
 

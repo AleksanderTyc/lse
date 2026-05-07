@@ -78,34 +78,7 @@ def create_load_record(par_date:datetime.date) -> int:
 
 
 # Create symbols_to_process list, mapping symbol, symbol.L and symbol_id
-def get_processed_symbols() -> Tuple[List[str],Dict[str,int],Dict[str,str]]:
-    """
-    Get symbols to process list from DB.
-    Convert symbols to .L format required by YF to avoid ambiguity.
-    Build and return two dictionaries to be used to map symbol column later:
-    - .L symbol to symbol id
-    - .L symbol to original symbol
-    
-    Returns:
-        List[str]: Entire list of symbol.L
-        Tuple[Dict[str,int],Dict[str,str]]: (
-            {symbol.L -> symbol id},
-            {symbol.L -> symbol}
-        )
-    """
-    
-    symbols_to_process = []
-    map_yfsymbol_to_id:Dict[str,int] = {}
-    map_yfsymbol_to_symbol:Dict[str,str] = {}
-    with engine.connect() as conn:
-        result=conn.execute(sqlalchemy.text("select id, symbol from symbols;"))
-        for row in result:
-            yf_symbol = '.'.join([row[1], 'L'])
-            symbols_to_process.append(yf_symbol)
-            map_yfsymbol_to_id[yf_symbol] = row[0]
-            map_yfsymbol_to_symbol[yf_symbol] = row[1]
-    
-    return( symbols_to_process, map_yfsymbol_to_id, map_yfsymbol_to_symbol )
+from LSE_Library import get_processed_symbols
 
 
 # Diagnostics, prototyping
@@ -239,8 +212,7 @@ print( f"* D * gl_as_at_date is {gl_as_at_date}" )
 # print( f"start_str is {start_str}" )
 # sys.exit(0)
 
-
-symbols_to_process, map_yfsymbol_to_id, map_yfsymbol_to_symbol = get_processed_symbols()
+symbols_to_process, map_yfsymbol_to_id, map_yfsymbol_to_symbol, map_yfsymbol_to_noofattempts  = get_processed_symbols()
 
 for nthslice in range(0,48):
     print( f'* D * Processing slice {nthslice}, symbols {symbols_to_process[nthslice*31]} to {symbols_to_process[(nthslice+1)*31-1]}')
