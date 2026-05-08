@@ -15,6 +15,8 @@
 # I1: CountStrong / CountTraded
 # I2: CountStrong[Sector] / CountTraded[Sector]
 
+# https://dash.plotly.com/
+
 """
 Plan
 
@@ -46,6 +48,8 @@ import time as tm
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import dash
+from dash import dcc, html, Input, Output, State
 
 from typing import Tuple, List, Dict, Any, Optional
 import sys
@@ -208,13 +212,14 @@ def calculate_trend(
         Returns:    
             pd.DataFrame: DataFrame ( quote date, symbol, symbol_id, close price )
     """
+    print( f"* D * calculate_trend * par_sectorKey: {par_sectorKey}, par_industryKey: {par_industryKey}" )
     
     # Subsets the granular data according to sector and industry parameters.
     dfcond = pd.Series(True, index = par_granular.index)
     if( par_sectorKey != '<All>'):
         dfcond = dfcond & (par_granular.sectorKey == par_sectorKey)
     if( par_industryKey != '<All>'):
-        dfcond = dfcond & (par_granular.sectorKey == par_industryKey)
+        dfcond = dfcond & (par_granular.industryKey == par_industryKey)
     dt_subset = par_granular[dfcond]
 
     # Calculates MA and determines if closing price is above the MA.
@@ -253,53 +258,340 @@ gl_data.close.isna().any()
 # gl_trend_data = calculate_trend(gl_data, '<All>', '<All>')
 gl_trend_data = calculate_trend(gl_data)
 """
-gl_trend_data.loc[gl_trend_start_date:gl_trend_end_date]
-
 gl_trend_data = calculate_trend(gl_data, 'technology')
 gl_trend_data = calculate_trend(gl_data, 'technology', software-infrastructure')
 
 """
 
-fig = go.Figure(data=[
-    go.Bar(
-        x=gl_trend_data.index,
-        y=gl_trend_data['tmeter'],
+# ============================================================================
+# DATA SOURCES FOR SECTORS AND INDUSTRIES
+# ============================================================================
+
+# In a real implementation, these would come from your database
+# For demo purposes, we'll create sample sector and industry hierarchies
+
+def get_available_sectors( par_granular: pd.DataFrame ) -> List[str]:
+    """
+    Get a list of available sectors
+    
+    Sectors (sectorKey) come from granular data, column sectorKey.
+    Take unique values.
+    TBD: Treatment of "" vs NULL. For now - glue them together.
+        
+    Args:
+        par_granular (pd.DataFrame): granular data (quote_date, symbol) level, showing sectorKey, industryKey for every record
+
+    Returns:
+        List[str]: List of sectorKey, with special entry <All> at the beginning
+    """
+    print( f"* D * get_available_sectors" )
+    raw_sectors = par_granular.sectorKey
+    fillna_sectors = raw_sectors.fillna( value = "" )
+    return ['<All>'] + fillna_sectors.unique().tolist()
+
+
+def get_industries_for_sector(
+        par_granular: pd.DataFrame,
+        par_sectorKey: Optional[str] = '<All>'
+        ) -> List[Optional[str]]:
+    """
+    Get a list of industries for a given sector
+    
+    par_sectorKey may be:
+        <All> - there is no subsetting based on sector, <All> should be returned
+        None  - None should be returned (*)
+        blank - blank should be returned (*)
+        else  - take subset where par_granular.sectorKey == par_sectorKey and return unique industryKey
+    (*) are based on the facts:
+        - sectorKey is NULL iff industryKey is NULL
+        - sectorKey is blank iff industryKey is blank
+    
+    Args:
+        par_granular (pd.DataFrame): granular data (quote_date, symbol) level, showing sectorKey, industryKey for every record
+        par_sectorKey (Optional[str]): sector for which industries should be listed, or <All> if not applicable
+
+    Returns:
+        List[str]: List of industryKey, with special entry <All> at the beginning
+    """
+    print( f"* D * get_industries_for_sector * par_sectorKey: {par_sectorKey}" )
+    if par_sectorKey == None:
+        return [None]
+    
+    if par_sectorKey == ['']:
+        return ''
+    
+    if par_sectorKey == ['<All>']:
+        return '<All>'
+    
+    # No need to fillna, because (*) iff above
+    return ['<All>'] + (par_granular[par_granular.sectorKey == par_sectorKey]['industryKey'].unique().tolist())
+
+
+# ============================================================================
+# DASH APPLICATION
+# ============================================================================
+
+def create_figure(df: pd.DataFrame, sector: str, industry: str) -> go.Figure:
+    """
+    Create the bar chart figure from the DataFrame
+    """
+    # Create figure
+    fig = go.Figure()
+    
+    # Add bar chart
+    fig.add_trace(go.Bar(
+        x=df.index,
+        y=df['tmeter'],
         name='tmeter',
         marker_color='steelblue',
         marker_line_color='navy',
         marker_line_width=1,
-        opacity=0.7,
-        text=gl_trend_data['tmeter'].round(3),  # Show values on hover
+        opacity=0.8,
+        text=df['tmeter'].round(3),
         textposition='auto',
+        textfont=dict(size=10),
         hovertemplate='<b>Date</b>: %{x|%Y-%m-%d}<br>' +
                       '<b>tmeter</b>: %{y:.3f}<br>' +
-                      '<extra></extra>'
+                      '<b>Strong Count</b>: %{customdata[0]:.0f}<br>' +
+                      '<b>Strong Sum</b>: %{customdata[1]:.2f}<br>' +
+                      '<b>Market Cap Sum</b>: %{customdata[2]:.2e}<br>' +
+                      '<extra></extra>',
+        customdata=np.column_stack([df['strong_count'], df['strong_sum'], df['mCap_sum']])
+    ))
+    
+    # Determine title based on selections
+    if sector == '<All>' and industry == '<All>':
+        title = 'Overall Market tmeter Trend'
+    elif industry != '<All>':
+        title = f'tmeter Trend for {industry} Industry'
+    else:
+        title = f'tmeter Trend for {sector} Sector'
+    
+    # Update layout
+    fig.update_layout(
+        title=dict(
+            text=title,
+            font=dict(size=18, color='#2c3e50'),
+            x=0.5
+        ),
+        xaxis=dict(
+            title='Date',
+            # titlefont=dict(size=14, color='#2c3e50'),
+            tickformat='%Y-%m-%d',
+            tickangle=45,
+            gridcolor='lightgray',
+            showgrid=True
+        ),
+        yaxis=dict(
+            title='tmeter Value',
+            # titlefont=dict(size=14, color='#2c3e50'),
+            range=[0, 1.05],
+            tickformat='.0%',
+            gridcolor='lightgray',
+            showgrid=True,
+            zeroline=True,
+            zerolinecolor='black',
+            zerolinewidth=1
+        ),
+        hovermode='x unified',
+        plot_bgcolor='white',
+        height=500,
+        margin=dict(t=80, b=50, l=50, r=50),
+        showlegend=False
     )
+    
+    # Add horizontal line at 0.5 (neutral)
+    fig.add_hline(y=0.5, line_dash="dash", line_color="gray", 
+                  annotation_text="Neutral (0.5)", annotation_position="bottom right")
+    
+    return fig
+
+# Initialize the Dash app
+app = dash.Dash(__name__, title='tmeter Trend Dashboard')
+
+# Get initial data
+initial_sector = '<All>'
+initial_industry = '<All>'
+initial_df = calculate_trend(gl_data, initial_sector, initial_industry)
+
+# App layout
+app.layout = html.Div([
+    # Header
+    html.Div([
+        html.H1('📊 tmeter Trend Analysis Dashboard', 
+                style={'text-align': 'center', 'color': '#2c3e50', 'margin-bottom': '20px'}),
+        html.P('Interactive bar chart showing tmeter values over time with sector and industry filters',
+               style={'text-align': 'center', 'color': '#7f8c8d', 'margin-bottom': '30px'})
+    ]),
+    
+    # Control Panel
+    html.Div([
+        html.Div([
+            html.Label('Select Sector:', style={'font-weight': 'bold', 'margin-right': '10px'}),
+            dcc.Dropdown(
+                id='sector-dropdown',
+                options=[{'label': sector, 'value': sector} for sector in get_available_sectors(gl_data)],
+                value=initial_sector,
+                clearable=False,
+                style={'width': '100%', 'margin-bottom': '10px'}
+            ),
+        ], style={'width': '45%', 'display': 'inline-block', 'margin-right': '5%'}),
+        
+        html.Div([
+            html.Label('Select Industry:', style={'font-weight': 'bold', 'margin-right': '10px'}),
+            dcc.Dropdown(
+                id='industry-dropdown',
+                options=[{'label': industry, 'value': industry} for industry in get_industries_for_sector(gl_data, initial_sector)],
+                value=initial_industry,
+                clearable=False,
+                style={'width': '100%', 'margin-bottom': '10px'}
+            ),
+        ], style={'width': '45%', 'display': 'inline-block'}),
+    ], style={'width': '80%', 'margin': '0 auto 30px auto', 'padding': '20px', 
+              'border': '1px solid #ddd', 'border-radius': '10px', 'background-color': '#f9f9f9'}),
+    
+    # Loading indicator and chart
+    html.Div([
+        dcc.Loading(
+            id='loading-chart',
+            type='circle',
+            children=[
+                dcc.Graph(
+                    id='tmeter-chart',
+                    figure=create_figure(initial_df, initial_sector, initial_industry),
+                    style={'height': '600px'}
+                )
+            ]
+        )
+    ]),
+    
+    # Statistics Panel
+    html.Div([
+        html.Div([
+            html.H3('📈 Statistics', style={'margin-top': '0', 'color': '#2c3e50'}),
+            html.Div(id='statistics-output', style={'font-size': '14px'})
+        ], style={'width': '80%', 'margin': '20px auto', 'padding': '15px', 
+                  'border': '1px solid #ddd', 'border-radius': '10px', 
+                  'background-color': '#f9f9f9'})
+    ]),
+    
+    # Footer
+    html.Div([
+        html.Hr(),
+        html.P('Interactive Dashboard | Use dropdowns to filter by sector and industry',
+               style={'text-align': 'center', 'color': '#95a5a6', 'font-size': '12px'})
+    ], style={'margin-top': '30px'})
 ])
 
-# Update layout
-fig.update_layout(
-    title='tmeter Values Over Time',
-    xaxis_title='Date',
-    yaxis_title='tmeter Value',
-    yaxis=dict(
-        range=[0, 1.05],
-        tickformat='.0%',
-        gridcolor='lightgray',
-        gridwidth=0.5
-    ),
-    xaxis=dict(
-        tickangle=45,
-        tickformat='%Y-%m-%d'
-    ),
-    template='plotly_white',
-    width=1200,
-    height=600,
-    hovermode='x unified'
+def calculate_statistics(df: pd.DataFrame, sector: str, industry: str) -> html.Div:
+    """
+    Calculate and format statistics from the DataFrame
+    """
+    if df.empty:
+        return html.Div("No data available for selected filters")
+    
+    # Determine label
+    if sector == '<All>' and industry == '<All>':
+        label = "Overall Market"
+    elif industry != '<All>':
+        label = f"{industry} Industry"
+    else:
+        label = f"{sector} Sector"
+    
+    # Calculate statistics
+    stats = {
+        'Current tmeter': df['tmeter'].iloc[-1],
+        'Average tmeter': df['tmeter'].mean(),
+        'Min tmeter': df['tmeter'].min(),
+        'Max tmeter': df['tmeter'].max(),
+        'Std Dev': df['tmeter'].std(),
+        'Total Strong Count': df['strong_count'].sum(),
+        'Total Strong Sum': df['strong_sum'].sum(),
+        'Total Market Cap': df['mCap_sum'].sum(),
+        'Date Range': f"{df.index.min().strftime('%Y-%m-%d')} to {df.index.max().strftime('%Y-%m-%d')}",
+        'Number of Days': len(df)
+    }
+    
+    # Create statistics display
+    return html.Div([
+        html.H4(f"📊 Statistics for {label}", style={'color': '#3498db'}),
+        html.Table([
+            html.Tr([html.Td(k, style={'font-weight': 'bold', 'padding': '5px'}), 
+                    html.Td(f"{v:.4f}" if isinstance(v, float) else str(v), 
+                           style={'padding': '5px'})])
+            for k, v in stats.items()
+        ], style={'width': '100%', 'border-collapse': 'collapse'})
+    ])
+
+
+# ============================================================================
+# CALLBACKS
+# ============================================================================
+
+@app.callback(
+    [Output('industry-dropdown', 'options'), Output('industry-dropdown', 'value')],
+    Input('sector-dropdown', 'value')
 )
+def update_industry_options(selected_sector):
+    """
+    Update industry dropdown options based on selected sector
+    """
+    print( f"* D * update_industry_options * selected_sector: {selected_sector}" )
+    industries = get_industries_for_sector(gl_data, selected_sector)
+    print( f"* D * update_industry_options * industries: {industries}, {type(industries)}" )
+    return [{'label': industry, 'value': industry} for industry in industries], '<All>'
 
-# Show the chart
-fig.show()
 
-print("Interactive chart displayed! You can zoom, pan, and hover over bars.")
+@app.callback(
+    [
+    # Output('industry-dropdown', 'value'),
+     Output('tmeter-chart', 'figure'),
+     Output('statistics-output', 'children')],
+    [Input('sector-dropdown', 'value'),
+     Input('industry-dropdown', 'value')]
+)
+def update_chart(selected_sector, selected_industry):
+    """
+    Update chart and statistics based on sector and industry selections
+    """
+    # Validate industry selection (if it doesn't belong to sector, reset to '<All>')
+    # valid_industries = get_industries_for_sector(gl_data, selected_sector)
+    # if selected_industry not in valid_industries:
+    #     selected_industry = '<All>'
+    
+    # Calculate new data
+    print( f"* D * update_chart * about to call calculate_trend selected_sector: {selected_sector}, selected_industry: {selected_industry}" )
+    df = calculate_trend(gl_data, selected_sector, selected_industry)
+    
+    # Create figure
+    fig = create_figure(df, selected_sector, selected_industry)
+    
+    # Calculate statistics
+    stats = calculate_statistics(df, selected_sector, selected_industry)
+    
+    return fig, stats
+    # return selected_industry, fig, stats
+
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+if __name__ == '__main__':
+    print("=" * 60)
+    print("📊 Starting tmeter Trend Dashboard")
+    print("=" * 60)
+    print("\n🚀 Server is starting...")
+    print("📍 Access the dashboard at: http://localhost:8050")
+    print("\n💡 Instructions:")
+    print("   1. Open your web browser")
+    print("   2. Navigate to http://localhost:8050")
+    print("   3. Use the dropdowns to filter by sector and industry")
+    print("   4. Hover over bars to see detailed information")
+    print("\n⚠️  Press Ctrl+C to stop the server")
+    print("=" * 60)
+    
+    # Run the Dash app
+    app.run(debug=True, host='0.0.0.0', port=8050)
+    # app.run_server(debug=True, host='0.0.0.0', port=8050)
 
