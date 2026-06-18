@@ -1,7 +1,7 @@
 # LSE_BAU_Trendometer
 # Based on Wyzwanie Inwestycyjne:
 
-# Paramaeter: Window: 130 bars
+# Parameter: Window: 130 bars
 
 # Calculate 1. MA <- Moving Average (simple arithmetic) of the last Window bars, take Close price
 # Calculate 2. RelS <- (C - MA)/MA
